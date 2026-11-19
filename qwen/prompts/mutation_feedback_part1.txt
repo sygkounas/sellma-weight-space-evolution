@@ -1,0 +1,80 @@
+The objective is to improve Qwen3-1.7B’s zero-shot accuracy on Swedish grammaticality classification (ScaLA-sv) through ONE mutation in the pretrained model’s weight space. This is Turn 1 of 2. Inspect the original checkpoint in this turn. Turn 2 will use your measurements to choose and implement the mutation.
+
+Definition used throughout this experiment:
+A weight-space mutation is one reproducible numerical edit rule applied to one or more entries of an EXISTING pretrained weight tensor. Editing selected entries, a row, or a block of an existing weight tensor qualifies. One mutation may change many scalar weights. The architecture, model forward computation, evaluator, and decision threshold stay fixed. At least one stored weight value must differ after BF16 rounding when the mutation is implemented in Turn 2.
+
+Baseline feedback from the original checkpoint:
+
+Setting   Correct/scored   Accuracy   MCC     AUC     Grammatical right   Corrupted right
+0-shot    512/1024         50.00%     0.000   0.576   512/512             0/512
+
+The zero-shot baseline predicted “Ja” for every sentence.
+
+The evaluator computes:
+
+margin = log P("Ja" | prompt) − log P("Nej" | prompt)
+
+It sums conditional log probabilities over all tokens in each answer. “Ja” is one token [52445]. “Nej” is two tokens [8813, 73], corresponding to “Ne” followed by “j”. A positive margin predicts grammatical. The primary objective is zero-shot accuracy at the fixed zero threshold.
+
+The evaluator calls model.model(...) to obtain the hidden states and then calls model.lm_head(...) directly. Choose an existing weight tensor used on this path. You may inspect related tensors or reference token rows if they help you interpret the target. Choose the target independently using the baseline and checkpoint.
+
+For this reply:
+
+1. Give a two- or three-sentence rationale naming the weight tensor or tensors you will inspect, the baseline observation motivating that choice, and the numerical measurement that would help design a weight edit.
+2. Return the FULL runnable Python script below with inspect_weights() implemented. Return the code inline.
+3. Save the report as qwen3_structural_inspection_feedback.json. Keep that filename for compatibility with Turn 2.
+4. Include exact module and parameter names, shapes, dtype, relevant configuration, and whether the target shares storage with another parameter. Include actual indexed scalar values from the checkpoint and explain what each index refers to. Include any norms, directions, or comparisons you intend Turn 2 to use. A ranked list of indices without their weight values is insufficient.
+5. Use only the supplied aggregate feedback, checkpoint weights, model configuration, and tokenizer. Do not use dataset examples, run model forward passes, compute gradients, change weights, or evaluate candidate edits in this turn.
+6. Keep printed terminal output under 12,000 characters. The JSON may contain more detail.
+
+
+import json
+from pathlib import Path
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+ROOT = Path(__file__).resolve().parent
+CHECKPOINT = ROOT / "qwen3-1.7b"
+REPORT = ROOT / "qwen3_structural_inspection_feedback.json"
+
+PROMPT = (
+    "Är följande mening grammatiskt korrekt på svenska?\n"
+    "Börja ditt svar med Ja eller Nej. Motivera sedan kort med en mening.\n\n"
+    "Mening: {sentence}"
+)
+ANSWERS = {"correct": "Ja", "incorrect": "Nej"}
+
+
+@torch.inference_mode()
+def inspect_weights(model, tokenizer, answer_ids):
+    """Return JSON-serializable measurements for designing one weight-space edit."""
+    raise NotImplementedError
+
+
+def main():
+    tokenizer = AutoTokenizer.from_pretrained(CHECKPOINT, local_files_only=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        CHECKPOINT,
+        torch_dtype=torch.bfloat16,
+        local_files_only=True,
+    ).eval()
+
+    answer_ids = {
+        label: tokenizer(text, add_special_tokens=False)["input_ids"]
+        for label, text in ANSWERS.items()
+    }
+    report = {
+        "checkpoint": CHECKPOINT.name,
+        "answer_ids": answer_ids,
+        "inspection": inspect_weights(model, tokenizer, answer_ids),
+    }
+    REPORT.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False),
+        encoding="utf-8",
+    )
+    print(f"Saved inspection report to {REPORT}")
+
+
+if __name__ == "__main__":
+    main()

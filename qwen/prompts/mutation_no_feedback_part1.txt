@@ -1,0 +1,73 @@
+The objective is to improve Qwen3-1.7B’s zero-shot accuracy on Swedish grammaticality classification (ScaLA-sv) through one direct weight edit. The edit is to be chosen after inspecting the actual checkpoint weights. This task has two turns in the same chat.
+
+Turn 1 — weight inspection (this reply)
+
+Any layer or combination of layers may be selected. The reply should contain:
+
+1. A two- or three-sentence explanation of which tensors are to be inspected, why they were selected, and what observation could guide a weight edit.
+2. The complete runnable Python script below, with inspect_weights() implemented. The script should print the selected tensor names and the indexed values or numerical measurements needed to interpret the findings. Terminal output should stay under 12,000 characters.
+
+Only checkpoint weights, model configuration, and tokenizer information may be used. No dataset examples, evaluation results, forward passes, or gradients may be used. All weights must remain unchanged in this turn.
+
+Turn 2 — weight edit
+
+The inspection script will be run locally, and its terminal output will be pasted into this same chat. In that second reply, one weight edit should be chosen based on the observed measurements. The reply should identify the observation that motivated the edit and provide a runnable Python function that applies it to the original checkpoint. The prompt, answer strings, scoring rule, and decision threshold must remain fixed.
+
+Zero-shot evaluation
+
+Each sentence is presented as a single user message using the exact Swedish prompt in the code below. The Qwen chat template is applied with add_generation_prompt=True and enable_thinking=False. No demonstrations are included.
+
+The evaluator scores the answer strings "Ja" and "Nej" by summing the conditional log probabilities of each answer’s tokens. The margin is log P("Ja" | prompt) − log P("Nej" | prompt). A positive margin predicts grammatically correct. A zero or negative margin predicts incorrect. Fitness is classification accuracy at this fixed threshold.
+
+The code that you will return should save the weights in a proper reading format so turn 2 will be fed to you as file. 
+Python script to complete for Turn 1:
+
+```python
+from pathlib import Path
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+CHECKPOINT = Path(__file__).resolve().parent / "qwen3-1.7b"
+
+# Exact user prompt and answer strings used by the zero-shot evaluator.
+PROMPT = (
+    "Är följande mening grammatiskt korrekt på svenska?\n"
+    "Börja ditt svar med Ja eller Nej. Motivera sedan kort med en mening.\n\n"
+    "Mening: {sentence}"
+)
+ANSWERS = {"correct": "Ja", "incorrect": "Nej"}
+
+
+@torch.inference_mode()
+def inspect_weights(model, tokenizer, answer_ids):
+    """Inspect the selected weights and print the measurements."""
+    raise NotImplementedError
+
+
+def main():
+    tokenizer = AutoTokenizer.from_pretrained(
+        CHECKPOINT,
+        local_files_only=True,
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        CHECKPOINT,
+        torch_dtype=torch.bfloat16,
+        local_files_only=True,
+    ).to("cuda").eval()
+
+    # Match the evaluator's tokenization, including multi-token answers.
+    answer_ids = {
+        label: tokenizer(answer, add_special_tokens=False)["input_ids"]
+        for label, answer in ANSWERS.items()
+    }
+    for label, ids in answer_ids.items():
+        tokens = tokenizer.convert_ids_to_tokens(ids)
+        print(f"{ANSWERS[label]!r}: ids={ids}, tokens={tokens}")
+
+    inspect_weights(model, tokenizer, answer_ids)
+
+
+if __name__ == "__main__":
+    main()
+```

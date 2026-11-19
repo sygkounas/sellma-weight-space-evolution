@@ -1,0 +1,189 @@
+The attached `qwen3_weight_inspection.json` contains the measurements and weight values requested in the first turn.
+
+Based on those measurements, select one direct weight edit intended to improve Qwen3-1.7B’s zero-shot Swedish grammaticality classification accuracy. In two or three sentences, identify the specific observation that motivated the edit and explain the expected effect.
+
+Return ONE COMPLETE runnable Python script named `scala_weight_edit.py`. The evaluator is provided below. Implement `apply_mutation(model, tokenizer)` and return the entire script, including the evaluator. The script must run with:
+
+    python scala_weight_edit.py
+
+The execution order is already specified in `main()`:
+
+1. Load the original local Qwen checkpoint once.
+2. Immediately apply the chosen weight edit once, in memory. Print the affected tensor names and the number of unique stored parameter values that actually changed after BF16 rounding. Account for shared input and output embeddings.
+3. Run zero-shot evaluation using the edited model.
+4. Print accuracy, MCC, and AUC and save the per-sentence JSONL file.
+
+The original baseline has already been evaluated separately. Only the edited model needs to be evaluated by this script. Choose the edit using the inspection report alone. Keep the checkpoint on disk unchanged. Preserve the evaluator’s Swedish prompt, tokenization, full-answer log-probability scoring, and fixed zero threshold. No gradient training or tuning against evaluation results.
+
+```python
+import json
+import math
+from datetime import datetime
+from pathlib import Path
+
+import pyarrow.parquet as pq
+import torch
+from huggingface_hub import hf_hub_download
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+
+ROOT = Path(__file__).resolve().parent
+CHECKPOINT = ROOT / "qwen3-1.7b"
+DATA_FILE = "data/train-00000-of-00001.parquet"
+DATA_REVISION = "aded78beae37445bf3917102d0b332049cfc8c99"
+BATCH_SIZE = 8
+
+PROMPT = (
+    "Är följande mening grammatiskt korrekt på svenska?\n"
+    "Börja ditt svar med Ja eller Nej. Motivera sedan kort med en mening.\n\n"
+    "Mening: {sentence}"
+)
+ANSWERS = {"correct": "Ja", "incorrect": "Nej"}
+
+
+@torch.no_grad()
+def apply_mutation(model, tokenizer):
+    """Implement the edit chosen from the attached weight measurements."""
+    raise NotImplementedError("Replace with the selected weight edit.")
+
+
+def load_rows():
+    path = ROOT / "scala-sv" / DATA_FILE
+    if not path.is_file():
+        path = hf_hub_download(
+            repo_id="mteb/scala_sv_classification",
+            repo_type="dataset",
+            revision=DATA_REVISION,
+            filename=DATA_FILE,
+            local_dir=ROOT / "scala-sv",
+        )
+    rows = pq.read_table(path).to_pylist()
+    assert len(rows) == 1024
+    for index, row in enumerate(rows, start=1):
+        row["row"] = index
+    return rows
+
+
+def prompt_ids(tokenizer, sentence):
+    messages = [{"role": "user", "content": PROMPT.format(sentence=sentence)}]
+    text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+    )
+    return tokenizer(text, add_special_tokens=False)["input_ids"]
+
+
+@torch.inference_mode()
+def batch_margins(model, tokenizer, answer_ids, batch):
+    sequences = []
+    for row in batch:
+        prefix = prompt_ids(tokenizer, row["text"])
+        for label in ("correct", "incorrect"):
+            answer = answer_ids[label]
+            sequences.append((prefix + answer, len(answer)))
+
+    width = max(len(sequence) for sequence, _ in sequences)
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = tokenizer.eos_token_id
+
+    ids = torch.full((len(sequences), width), pad_id, dtype=torch.long)
+    mask = torch.zeros_like(ids)
+    for index, (sequence, _) in enumerate(sequences):
+        start = width - len(sequence)
+        ids[index, start:] = torch.tensor(sequence)
+        mask[index, start:] = 1
+
+    device = model.get_input_embeddings().weight.device
+    ids = ids.to(device)
+    mask = mask.to(device)
+    k = max(len(answer) for answer in answer_ids.values())
+
+    hidden = model.model(input_ids=ids, attention_mask=mask).last_hidden_state
+    logits = model.lm_head(hidden[:, -(k + 1):-1]).float()
+    log_probs = torch.log_softmax(logits, dim=-1)
+    targets = ids[:, -k:]
+    token_scores = log_probs.gather(2, targets.unsqueeze(-1)).squeeze(-1)
+
+    scores = []
+    for index, (_, answer_length) in enumerate(sequences):
+        scores.append(token_scores[index, -answer_length:].sum().item())
+    return [scores[i] - scores[i + 1] for i in range(0, len(scores), 2)]
+
+
+def auc(records):
+    ranked = sorted((r["margin"], r["gold"] == "correct") for r in records)
+    n_pos = sum(positive for _, positive in ranked)
+    n_neg = len(ranked) - n_pos
+    rank_sum = 0.0
+    i = 0
+    while i < len(ranked):
+        j = i + 1
+        while j < len(ranked) and ranked[j][0] == ranked[i][0]:
+            j += 1
+        average_rank = (i + j + 1) / 2
+        rank_sum += average_rank * sum(positive for _, positive in ranked[i:j])
+        i = j
+    return (rank_sum - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+
+
+def evaluate(model, tokenizer, answer_ids, rows, output_dir):
+    scored = rows
+    print(f"Starting zero-shot | scoring {len(scored)} sentences", flush=True)
+    records = []
+    path = output_dir / "edited_0shot.jsonl"
+    with path.open("x", encoding="utf-8") as handle:
+        for offset in range(0, len(scored), BATCH_SIZE):
+            batch = scored[offset:offset + BATCH_SIZE]
+            margins = batch_margins(model, tokenizer, answer_ids, batch)
+            for row, margin in zip(batch, margins):
+                record = {
+                    "row": row["row"],
+                    "sentence": row["text"],
+                    "gold": row["label"],
+                    "margin": round(margin, 4),
+                    "prediction": "correct" if margin > 0 else "incorrect",
+                    "corruption_type": row.get("corruption_type"),
+                }
+                records.append(record)
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    # Match the original baseline's summary, which uses recorded margins.
+    tp = sum(r["gold"] == "correct" and r["margin"] > 0 for r in records)
+    tn = sum(r["gold"] == "incorrect" and r["margin"] <= 0 for r in records)
+    fp = sum(r["gold"] == "incorrect" and r["margin"] > 0 for r in records)
+    fn = sum(r["gold"] == "correct" and r["margin"] <= 0 for r in records)
+    denominator = math.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+    mcc = (tp * tn - fp * fn) / denominator if denominator else 0.0
+    return len(records), (tp + tn) / len(records), mcc, auc(records)
+
+
+def main():
+    tokenizer = AutoTokenizer.from_pretrained(CHECKPOINT, local_files_only=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        CHECKPOINT,
+        torch_dtype=torch.bfloat16,
+        local_files_only=True,
+    ).to("cuda").eval()
+
+    # One edit to the loaded checkpoint, evaluated once.
+    apply_mutation(model, tokenizer)
+
+    answer_ids = {
+        label: tokenizer(text, add_special_tokens=False)["input_ids"]
+        for label, text in ANSWERS.items()
+    }
+    rows = load_rows()
+    output_dir = ROOT / datetime.now().strftime("scala_edited_%Y%m%d_%H%M%S_%f")
+    output_dir.mkdir()
+
+    n, accuracy, mcc, auc_value = evaluate(model, tokenizer, answer_ids, rows, output_dir)
+
+    print("\nEdited checkpoint (zero-shot)")
+    print("Sentences | Accuracy | MCC    | AUC")
+    print(f"{n:9d} | {accuracy:8.2%} | {mcc:+.3f} | {auc_value:.3f}")
+    print(f"Per-sentence results: {output_dir}")
+
+
+if __name__ == "__main__":
+    main()
+```

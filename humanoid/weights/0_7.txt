@@ -1,0 +1,157 @@
+def compute_reward(observation: np.ndarray) -> Tuple[float, Dict[str, float]]:
+
+
+    pos = observation[0:22]         # root + joint positions
+    vel = observation[22:45]        # root + joint velocities
+
+    torso_z = pos[0]                # z-coordinate of the torso (center)
+    # Correct per table:
+    # 22 | x-vel torso
+    # 23 | y-vel torso
+    # 24 | z-vel torso
+    # Given velocity starts at obs[24], torso x-vel is obs[22] which is *not* in vel slice.
+    # But the description at the end overrides with:
+    # *position: 0..23, *velocity: 24..46, so:
+    # obs[24] -> x-vel torso, obs[25] -> y-vel, obs[26] -> z-vel
+    # Use that consistent mapping:
+    torso_vx = observation[22]      # x-coordinate velocity of the torso (centre)
+    torso_vy = observation[23]      # y-coordinate velocity
+    torso_vz = observation[24]      # z-coordinate velocity
+
+    # Joint angles for a rough "human-like" pose measure
+    # indices from table (within the *position* slice):
+    abdomen_z = pos[5]
+    abdomen_y = pos[6]
+    abdomen_x = pos[7]
+
+    right_hip_x = pos[8]
+    right_hip_z = pos[9]
+    right_hip_y = pos[10]
+    right_knee = pos[11]
+
+    left_hip_x = pos[12]
+    left_hip_z = pos[13]
+    left_hip_y = pos[14]
+    left_knee = pos[15]
+
+    # Angular velocities of key joints for "smoothness"
+    # Indices in the velocity segment per table:
+    # 28..30 abdomen; 31..38 hips/knees. Map via absolute obs indices:
+    # vel starts at obs[24]; so local index = global_index - 24
+    abdomen_z_vel = observation[28]
+    abdomen_y_vel = observation[29]
+    abdomen_x_vel = observation[30]
+
+    right_hip_x_vel = observation[31]
+    right_hip_z_vel = observation[32]
+    right_hip_y_vel = observation[33]
+    right_knee_vel  = observation[34]
+
+    left_hip_x_vel  = observation[35]
+    left_hip_z_vel  = observation[36]
+    left_hip_y_vel  = observation[37]
+    left_knee_vel   = observation[38]
+
+    # -----------------------------
+    # 1. Forward running reward (speed along x)
+    # -----------------------------
+    # Encourage running in +x direction; penalize backwards motion.
+    # Use a smooth saturating transform to keep it in [0, 1).
+    speed_temp = 0.8  # higher -> stronger scaling of speed
+    forward_speed_raw = torso_vx
+    r_forward = 1.0 - np.exp(-speed_temp * np.maximum(forward_speed_raw, 0.0))
+
+    # -----------------------------
+    # 2. Upright / healthy posture (z in [1.0, 2.0])
+    # -----------------------------
+    height_temp = 5.0
+    # Desired band center and width
+    healthy_min, healthy_max = 1.0, 2.0
+    healthy_center = 0.5 * (healthy_min + healthy_max)
+    healthy_half_range = 0.5 * (healthy_max - healthy_min)
+
+    # Distance from center normalized by half-range
+    norm_height_error = np.abs(torso_z - healthy_center) / healthy_half_range
+    # 0 error -> reward ~1; grows smoothly lower as error increases
+    r_height = np.exp(-height_temp * norm_height_error)
+
+    # -----------------------------
+    # 3. Lateral & vertical velocity penalty (more straight-line running)
+    # -----------------------------
+    lateral_temp = 1.5
+    # Penalize sideways and excessive vertical motion
+    lateral_speed_sq = torso_vy ** 2 + torso_vz ** 2
+    r_lateral = np.exp(-lateral_temp * lateral_speed_sq)
+
+    # -----------------------------
+    # 4. Human-like pose (joint configuration)
+    # -----------------------------
+    # Target neutral-ish hip/abdomen and moderately bent knees
+    pose_temp = 2.0
+
+    # Rough targets (radians)
+    target_abdomen = np.array([0.0, 0.0, 0.0])  # upright torso
+    target_hip     = np.array([0.1, 0.0, 0.0])  # slight flex
+    target_knee    = 0.3                        # light bend
+
+    abdomen = np.array([abdomen_z, abdomen_y, abdomen_x])
+    right_hip = np.array([right_hip_x, right_hip_z, right_hip_y])
+    left_hip  = np.array([left_hip_x, left_hip_z, left_hip_y])
+
+    # L2 errors
+    err_abdomen = np.linalg.norm(abdomen - target_abdomen)
+    err_right_hip = np.linalg.norm(right_hip - target_hip)
+    err_left_hip = np.linalg.norm(left_hip - target_hip)
+    err_right_knee = np.abs(right_knee - target_knee)
+    err_left_knee = np.abs(left_knee - target_knee)
+
+    pose_error = (
+        0.3 * err_abdomen
+        + 0.2 * (err_right_hip + err_left_hip)
+        + 0.15 * (err_right_knee + err_left_knee)
+    )
+    r_pose = np.exp(-pose_temp * pose_error)
+
+    # -----------------------------
+    # 5. Smooth motion (low joint angular velocity)
+    # -----------------------------
+    smooth_temp = 0.5
+    joint_vels = np.array([
+        abdomen_z_vel, abdomen_y_vel, abdomen_x_vel,
+        right_hip_x_vel, right_hip_z_vel, right_hip_y_vel, right_knee_vel,
+        left_hip_x_vel,  left_hip_z_vel,  left_hip_y_vel,  left_knee_vel,
+    ])
+    smooth_cost = np.mean(joint_vels ** 2)
+    r_smooth = np.exp(-smooth_temp * smooth_cost)
+
+    # -----------------------------
+    # Combine components
+    # -----------------------------
+    # Weights chosen to keep contributions balanced and non-contradictory:
+    # - forward speed is primary
+    # - uprightness and straight motion as strong constraints
+    # - pose and smoothness slightly softer
+    w_forward = 0.45
+    w_height = 0.2
+    w_lateral = 0.15
+    w_pose = 0.1
+    w_smooth = 0.1
+
+    total_reward = (
+        w_forward * r_forward
+        + w_height * r_height
+        + w_lateral * r_lateral
+        + w_pose * r_pose
+        + w_smooth * r_smooth
+    )
+
+    components: Dict[str, float] = {
+        "forward_speed_reward": float(r_forward),
+        "height_reward": float(r_height),
+        "lateral_motion_reward": float(r_lateral),
+        "pose_reward": float(r_pose),
+        "smoothness_reward": float(r_smooth),
+        "total_reward": float(total_reward),
+    }
+
+    return float(total_reward), components
