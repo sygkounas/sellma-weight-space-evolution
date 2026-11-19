@@ -11,7 +11,7 @@ Can performance feedback help an LLM mutate the weights of a trained network? We
 GPT-6.2 Astra proposed the mutations and crossovers in the ChatGPT interface with reasoning effort set to *high*. Each proposal used a fresh chat with memory disabled. The response was saved and the chat deleted. Parent programs and evaluation results were supplied explicitly.
 
 - **G0** is the shared original checkpoint. In the no-feedback condition, Astra independently proposed two single mutations of G0 using the task and weight information.
-- **G1–G3** are three successive mutations in each of two feedback-guided lineages. Each candidate descends from the preceding candidate in its lineage.
+- **G1–G3** are three successive mutations in each of two feedback-guided lineages. Each candidate descends from the preceding candidate in its lineage, except that Qwen Lineage 2's G2 restarted from the original checkpoint after its G1 answered *Nej* to every sentence.
 - **G4** shows two crossover children, A and B. For Humanoid, A and B used different parent pairings. For Qwen, both children used the same G3 parents.
 
 Astra generated Python code to apply each mutation in memory and evaluate the candidate. Evaluations ran locally on an NVIDIA RTX A2000 laptop GPU with 8 GB of VRAM.
@@ -33,7 +33,7 @@ The REvolve Humanoid task is to move as fast as possible along the x-axis while 
 | G2 | 2.34 | 2.24 |
 | G3 | **2.41** | **2.33** |
 
-All six mutation candidates completed 5/5 episodes in the reported rerun.
+All six mutation candidates completed 5/5 episodes in the final evaluation.
 
 | Crossover | Parents and their fitness | Child fitness | Finished |
 |---|---|---:|---:|
