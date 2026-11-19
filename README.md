@@ -115,6 +115,8 @@ Following MEMENTO, a subsequent experiment could test whether retrieving earlier
 
 ## Repository and reproduction
 
+**How the search was run.** The evolutionary loop was run by hand in the ChatGPT interface, not through the API. For each proposal, the corresponding prompt in `prompts/` was pasted into a fresh chat. In the feedback and crossover conditions, the parent's code and results were added. Astra returned one complete script per individual (G1–G4), which was run locally to obtain its score. The scripts in this repository reproduce the evaluation of the reported individuals. Pasting the same prompts again would produce new proposals, because LLM outputs are not deterministic. Scaling the search to larger populations and more generations would require automating this loop through the API.
+
 ```text
 humanoid/
   get_intial_weights.py       # builds the prompt containing the actor weights
